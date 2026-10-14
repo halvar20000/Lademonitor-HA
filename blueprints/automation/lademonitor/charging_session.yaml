@@ -6,7 +6,8 @@ blueprint:
     Ladevorgang per `lademonitor.begin_charging_session` /
     `lademonitor.end_charging_session` an den Lademonitor-Server. Bei
     Ladeende wird optional eine Mobile-App-Benachrichtigung mit Start-/
-    Endzeit, SoC-Verlauf und Lade-Art (AC/DC) verschickt.
+    Endzeit, SoC-Verlauf und Lade-Art (AC/DC) verschickt - oder eine Warnung,
+    wenn die Übertragung gescheitert ist.
 
     Passt auf jedes Fahrzeug, dessen Status-Sensor einen "verbunden, aber
     nicht ladend"-Ruhezustand sowie einen oder mehrere aktive Ladezustände
@@ -116,8 +117,10 @@ blueprint:
       description: >-
         Optional. Notify-Entity der Home Assistant Mobile App
         (Einstellungen → Geräte & Dienste → Entitäten → Domäne "notify"),
-        an die bei Ladeende eine Push-Benachrichtigung geschickt wird. Leer
-        lassen, um keine Benachrichtigung zu verschicken.
+        an die bei Ladeende eine Push-Benachrichtigung geschickt wird - auch
+        dann, wenn die Übertragung gescheitert ist. Leer lassen, um keine
+        Benachrichtigung zu verschicken (eine gescheiterte Übertragung steht
+        dann trotzdem in den Benachrichtigungen von Home Assistant).
       default: ""
       selector:
         entity:
@@ -153,23 +156,27 @@ actions:
               {{ trigger.from_state.state == idle_state
                  and trigger.to_state.state in active_states }}
         sequence:
+          - variables:
+              begin_data:
+                vehicle_external_id: "{{ vehicle_external_id }}"
+                soc_start: "{{ states(battery_soc_entity) | int(default=None) if battery_soc_entity else None }}"
+                charging_type: "{{ states(charging_type_entity) if charging_type_entity else None }}"
+                # `| float(default=None)` faengt 'unknown'/'unavailable' ab -
+                # in Home Assistant der Normalfall, wenn eine Quelle kurz weg
+                # ist. Bei einer weather-Entitaet steht der Wert im Attribut
+                # statt im Zustand, deshalb beide Wege.
+                outside_temp_c: >-
+                  {{ (state_attr(outside_temp_entity, 'temperature')
+                      if outside_temp_entity.startswith('weather.')
+                      else states(outside_temp_entity)) | float(default=None)
+                     if outside_temp_entity else None }}
           - action: lademonitor.begin_charging_session
-            data:
-              vehicle_external_id: "{{ vehicle_external_id }}"
-              soc_start: "{{ states(battery_soc_entity) | int(default=None) if battery_soc_entity else None }}"
-              charging_type: "{{ states(charging_type_entity) if charging_type_entity else None }}"
-              # `| float(default=None)` faengt 'unknown'/'unavailable' ab -
-              # in Home Assistant der Normalfall, wenn eine Quelle kurz weg
-              # ist. Bei einer weather-Entitaet steht der Wert im Attribut
-              # statt im Zustand, deshalb beide Wege.
-              outside_temp_c: >-
-                {{ (state_attr(outside_temp_entity, 'temperature')
-                    if outside_temp_entity.startswith('weather.')
-                    else states(outside_temp_entity)) | float(default=None)
-                   if outside_temp_entity else None }}
-              # Den Stand liest die Integration selbst aus (inkl. Wh/kWh) -
-              # sie bekommt nur den Sensor, nicht den Wert.
-              energy_sensor: "{{ energy_entity if energy_entity else None }}"
+            # Den Zaehlerstand liest die Integration selbst aus (inkl. Wh/kWh) -
+            # sie bekommt nur den Sensor, nicht den Wert. Ohne Sensor faellt
+            # das Feld ganz weg statt leer mitzugehen: so laeuft der Blueprint
+            # auch gegen eine Integration, die das Feld (noch) nicht kennt.
+            data: >-
+              {{ dict(begin_data, energy_sensor=energy_entity) if energy_entity else begin_data }}
       # aktiver Zustand -> Ruhezustand: Ladung beendet, Push an Lademonitor
       - conditions:
           - condition: template
@@ -185,18 +192,36 @@ actions:
               latitude: "{{ state_attr(device_tracker_entity, 'latitude') | float(default=None) if device_tracker_entity else None }}"
               longitude: "{{ state_attr(device_tracker_entity, 'longitude') | float(default=None) if device_tracker_entity else None }}"
             response_variable: lademonitor_session
+            # Scheitert der Push (Server nicht erreichbar, Fahrzeug-ID
+            # unbekannt ...), meldet die Integration das selbst als
+            # Benachrichtigung in Home Assistant. Hier laeuft die Automation
+            # trotzdem weiter, damit auch das Handy davon erfaehrt.
+            continue_on_error: true
           - if:
               - condition: template
                 value_template: "{{ notify_target != '' }}"
             then:
-              - action: notify.send_message
-                target:
-                  entity_id: "{{ notify_target }}"
-                data:
-                  message: >-
-                    Ladevorgang zu Lademonitor gesendet: Start
-                    {{ as_timestamp(lademonitor_session.start_time) | timestamp_custom('%d.%m. %H:%M') }} →
-                    Ende {{ as_timestamp(lademonitor_session.end_time) | timestamp_custom('%d.%m. %H:%M') }},
-                    SoC {{ lademonitor_session.soc_start }}% → {{ lademonitor_session.soc_end }}%,
-                    {{ lademonitor_session.charging_type }}{% if lademonitor_session.energy_kwh is defined %},
-                    {{ lademonitor_session.energy_kwh | round(1) }} kWh{% endif %}
+              - if:
+                  - condition: template
+                    value_template: "{{ lademonitor_session is defined }}"
+                then:
+                  - action: notify.send_message
+                    target:
+                      entity_id: "{{ notify_target }}"
+                    data:
+                      message: >-
+                        Ladevorgang zu Lademonitor gesendet: Start
+                        {{ as_timestamp(lademonitor_session.start_time) | timestamp_custom('%d.%m. %H:%M') }} →
+                        Ende {{ as_timestamp(lademonitor_session.end_time) | timestamp_custom('%d.%m. %H:%M') }},
+                        SoC {{ lademonitor_session.soc_start }}% → {{ lademonitor_session.soc_end }}%,
+                        {{ lademonitor_session.charging_type }}{% if lademonitor_session.energy_kwh is defined %},
+                        {{ lademonitor_session.energy_kwh | round(1) }} kWh{% endif %}
+                else:
+                  - action: notify.send_message
+                    target:
+                      entity_id: "{{ notify_target }}"
+                    data:
+                      message: >-
+                        Ladevorgang wurde NICHT an Lademonitor übertragen.
+                        Details stehen in den Benachrichtigungen von Home
+                        Assistant.

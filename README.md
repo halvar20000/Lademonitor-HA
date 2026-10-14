@@ -175,6 +175,42 @@ zurück, abrufbar per `response_variable` – für eigene Automationen z.B. so:
       {{ lademonitor_session.charging_type }}
 ```
 
+### Wenn die Übertragung scheitert
+
+Ab Version 0.6.1 meldet die Integration jeden gescheiterten Push selbst – ohne
+Einrichtung als **Benachrichtigung in Home Assistant** (Glocke in der
+Seitenleiste). Darin stehen der Fehler (z.B. „Server nicht erreichbar" oder
+die Begründung des Servers wie „Fahrzeug nicht gefunden") und die Werte des
+Ladevorgangs zum Nachtragen. Der nächste erfolgreiche Push desselben
+Fahrzeugs räumt sie wieder weg. Gemeldet werden ein nicht erreichbarer oder
+ablehnender Server, ungültige Werte im Aufruf und ein Ladeende ohne gemerkten
+Ladebeginn.
+
+Der gemerkte Ladevorgang bleibt nach einem Fehler stehen: ein erneuter Aufruf
+von `lademonitor.end_charging_session` überträgt ihn nachträglich (die Endzeit
+ist dann allerdings die des neuen Aufrufs).
+
+Der Blueprint schickt im Fehlerfall zusätzlich eine Warnung an die
+eingetragene Mobile-App-Benachrichtigung. Für eigene Automationen feuert die
+Integration das Ereignis `lademonitor_push_failed` (Daten: `service`,
+`vehicle_external_id`, `error`, `session`):
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: lademonitor_push_failed
+actions:
+  - action: notify.send_message
+    target:
+      entity_id: notify.mein_handy
+    data:
+      message: "Lademonitor: {{ trigger.event.data.error }}"
+```
+
+Ein optionaler Sensor (z.B. der Wallbox-Zähler), der leer, unbekannt oder
+keine gültige Entität ist, lässt den Push nicht mehr scheitern – er wird
+ignoriert, und der Server schätzt die kWh wie ohne Zähler.
+
 ### Manuell (ohne Blueprint)
 
 Vollständiges Beispiel für MySkoda/Škoda Enyaq (dieselbe Logik lässt sich auf
