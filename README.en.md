@@ -178,6 +178,41 @@ own automations, for example like this:
       {{ lademonitor_session.charging_type }}
 ```
 
+### When a push fails
+
+From version 0.6.1 the integration reports every failed push itself – without
+any setup, as a **Home Assistant notification** (bell in the sidebar). It
+contains the error (e.g. "server not reachable", or the server's reason such
+as "vehicle not found") and the session's values so you can enter it by
+hand. The next successful push for the same vehicle dismisses it. Reported
+are an unreachable or rejecting server, invalid values in the call, and a
+charging end without a remembered start.
+
+The remembered session stays after a failure: calling
+`lademonitor.end_charging_session` again pushes it later (the end time is then
+that of the new call).
+
+The blueprint additionally sends a warning to the configured mobile app
+notification. For your own automations the integration fires the event
+`lademonitor_push_failed` (data: `service`, `vehicle_external_id`, `error`,
+`session`):
+
+```yaml
+triggers:
+  - trigger: event
+    event_type: lademonitor_push_failed
+actions:
+  - action: notify.send_message
+    target:
+      entity_id: notify.my_phone
+    data:
+      message: "Lademonitor: {{ trigger.event.data.error }}"
+```
+
+An optional sensor (e.g. the wallbox meter) that is empty, unknown or not a
+valid entity no longer makes the push fail – it is ignored and the server
+estimates the kWh as without a meter.
+
 ### Manual (without blueprint)
 
 Complete example for MySkoda/Škoda Enyaq (the same logic can be applied to

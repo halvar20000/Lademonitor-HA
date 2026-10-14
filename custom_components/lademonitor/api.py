@@ -26,6 +26,20 @@ class LademonitorConnectionError(Exception):
     """Server nicht erreichbar (Netzwerkfehler, falsche base_url, o.ä.)."""
 
 
+async def _error_detail(resp: aiohttp.ClientResponse) -> str:
+    try:
+        body = await resp.json(content_type=None)
+    except (aiohttp.ClientError, ValueError):
+        return resp.reason or ""
+    if isinstance(body, dict) and body.get("detail"):
+        return str(body["detail"])
+    return resp.reason or ""
+
+
+class LademonitorApiError(LademonitorConnectionError):
+    """Server erreichbar, lehnt die Anfrage aber ab (HTTP 4xx/5xx)."""
+
+
 class LademonitorApiClient:
     def __init__(
         self,
@@ -75,7 +89,11 @@ class LademonitorApiClient:
                     return await self._request(method, path, retry=False, **kwargs)
                 if resp.status == 401:
                     raise LademonitorAuthError("Auch Re-Login fehlgeschlagen - Zugangsdaten prüfen")
-                resp.raise_for_status()
+                if resp.status >= 400:
+                    # Die Begruendung des Servers (FastAPI: {"detail": ...}),
+                    # z.B. "Fahrzeug nicht gefunden", landet sonst nirgends -
+                    # sie steht dann in der Fehler-Benachrichtigung.
+                    raise LademonitorApiError(f"HTTP {resp.status}: {await _error_detail(resp)}")
                 if resp.status == 204:
                     return None
                 return await resp.json()
